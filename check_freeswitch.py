@@ -288,12 +288,12 @@ class FSStatus(BaseCommand):
         stack_max = float(d.get('stack_max'))
 
         data = {
-            'sessions': current_sessions / max_sessions,
-            '5min_sessions': last_five_sessions / max_sessions,
-            'sps': sessions_per_second / max_sessions_per_second,
-            '5min_sps': last_five_sps / max_sessions_per_second,
-            'cpu': cpu_current / cpu_max,
-            'stack': stack_current / stack_max,
+            'sessions': current_sessions / max_sessions * 100.0,
+            '5min_sessions': last_five_sessions / max_sessions * 100.0,
+            'sps': sessions_per_second / max_sessions_per_second * 100.0,
+            '5min_sps': last_five_sps / max_sessions_per_second * 100.0,
+            'cpu': cpu_current / cpu_max * 100.0,
+            'stack': stack_current / stack_max * 100.0,
         }
         for k, v in data.items():
             yield nagiosplugin.Metric(k, v, min=0.0, context='calls')
