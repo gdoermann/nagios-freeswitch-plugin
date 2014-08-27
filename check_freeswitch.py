@@ -39,10 +39,10 @@ def clean_text(value):
     value = unicode(re.sub('[^\w\s-]', '', value))
     return re.sub('[-\s]+', '-', value.strip())
 
+
 ######################################################
 #   Base command class
 ######################################################
-
 class BaseCommand(object):
     COMMAND = ''
 
@@ -192,7 +192,6 @@ FS_CHECKS = {
     "failed-calls-in": FailedCallsIn,
     "failed-calls-out": FailedCallsOut,
 }
-
 
 KEY_VALUE_REGEX = re.compile('([\w-]*)\s{3,100}(.*)')
 COUNT_TOTAL = re.compile('([\d]*)\s*total')
