@@ -119,9 +119,9 @@ def main(args):
     processor = PROCESSORS.get(args.query, DEFAULT_PROCESSOR)
     num = processor(output_dict)
     code = CODE.OK
-    if num > args.warning:
+    if args.warning and num > args.warning:
         code = CODE.WARNING
-    if num > args.critical:
+    if args.critical and num > args.critical:
         code = CODE.CRITICAL
     msg = 'FreeSWITCH OK: {} = {}'.format(full_fs_command, num)
     if args.warning:
