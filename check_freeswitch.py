@@ -13,30 +13,12 @@ FS_SETTINGS = {
     'password': None,
 }
 
-FS_CHECKS = {
-    "show-calls-count": 'show calls count',
-    "sofia-status": 'sofia status profile {profile}',
-    "sofia-status-profile-failed-calls-in": "sofia status profile {profile} failed calls in",
-    "sofia-status-profile-failed-calls-out": "sofia status profile {profile}  failed calls out"
-}
 
-DEFAULT_PROCESSOR = lambda d: int(d.get('calls_in', 0)) + int(d.get('calls_out', 0))
-
-PROCESSORS = {
-    "show-calls-count": lambda d: d.get('total_calls', 0),
-    "sofia-status": lambda d: int(d.get('calls_in', 0)) + int(d.get('calls_out', 0)),
-    "sofia-status-profile-failed-calls-in": lambda d: int(d.get('failed_calls_in', 0)),
-    "sofia-status-profile-failed-calls-out": lambda d: int(d.get('failed_calls_out', 0)),
-}
-
-KEY_VALUE_REGEX = re.compile('([\w-]*)\s{3,100}(.*)')
-COUNT_TOTAL = re.compile('([\d]*)\s*total')
-
-try:
-    # You can create a file named "fs_settings.py" on your python path with the above variable FS_SETTINGS and FS_CHECKS
-    from fs_settings import *
-except ImportError:
-    traceback.print_exc()
+class NAGIOS_CODE:
+    OK = 0
+    WARNING = 1
+    CRITICAL = 2
+    UNKNOWN = 3
 
 
 def clean_text(value):
@@ -47,93 +29,166 @@ def clean_text(value):
     return re.sub('[-\s]+', '-', value.strip())
 
 
-class CODE:
-    OK = 0
-    WARNING = 1
-    CRITICAL = 2
-    UNKNOWN = 3
+class BaseCommand(object):
+    COMMAND = ''
+
+    def __init__(self, cmd_args):
+        self.args = cmd_args
+        self.verbosity = cmd_args.verbosity
+        self.output_dict = None
+        self.profile = self.args.profile
+        self.full_fs_command = self.COMMAND
+
+    def at_warning_level(self, n):
+        return self.args.warning and n and n > self.args.warning
+
+    def at_critical_level(self, n):
+        return self.args.critical and n and n > self.args.critical
+
+    def code_for_number(self, n):
+        if self.at_critical_level(n):
+            code = NAGIOS_CODE.CRITICAL
+        elif self.at_warning_level(n):
+            code = NAGIOS_CODE.WARNING
+        else:
+            code = NAGIOS_CODE.OK
+        return code
+
+    def run(self):
+        verbosity = self.args.verbosity
+        self.log('Args: {}'.format(self.args), 3)
+        code, output, errors = self.run_command()
+        self.log('Command output: code: {}\n stdout: {}\n stderr: {}'.format(code, output, errors), 3)
+        if code != 0:
+            print 'ERROR: Command failed with code {}: {}'.format(code, errors)
+            exit(NAGIOS_CODE.UNKNOWN)
+
+        num = self.parse(output)
+        code = self.code_for_number(num)
+
+        msg = 'FreeSWITCH OK: {} ({}) = {}'.format(self.__class__.__name__, self.full_fs_command, num)
+        if self.args.warning:
+            msg += ';{}'.format(self.args.warning)
+        if self.args.critical:
+            msg += ';{}'.format(self.args.critical)
+        self.log('Exit Code: {}'.format(code), 1)
+        self.log('Message Length: {}'.format(len(msg)), 3)
+        print msg
+        exit(code)
+
+    @property
+    def cmd_args(self):
+        c = ['{fs_cli}'.format(**FS_SETTINGS)]
+        if FS_SETTINGS.get('host', None):
+            c += ['--host', FS_SETTINGS.get('host', None)]
+        if FS_SETTINGS.get('port', None):
+            c += ['--port', FS_SETTINGS.get('port', None)]
+        if FS_SETTINGS.get('password', None):
+            c += ['--password', FS_SETTINGS.get('password', None)]
+
+        fs_cmd = self.COMMAND
+        profile = ''
+        if self.profile:
+            profile = clean_text(self.profile)  # remove anything but [A-Za-z9-0]
+        self.full_fs_command = fs_cmd.format(profile=profile)
+        c += ['-x', self.full_fs_command]
+
+        self.log('Command: {}'.format(' '.join(c)), 2)
+        return c
+
+    def log(self, msg, verbosity):
+        if self.verbosity >= verbosity:
+            print msg
+
+    def run_command(self):
+        cmd = self.cmd_args
+        try:
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            proc.wait()
+            return proc.returncode, proc.stdout.read(), proc.stderr.read()
+        except OSError, e:
+            return 1, "", '{}: {}'.format(e.args[1], cmd[0])
+
+    def parse(self, output):
+        output_dict = {}
+        for line in output.split('\n'):
+            line = line.strip()
+            match = KEY_VALUE_REGEX.match(line)
+            totals = [i for i in COUNT_TOTAL.findall(line) if i]
+            if match:
+                self.log('Match line: {}'.format(line), 2)
+                k, v = match.groups()
+                if k:
+                    output_dict[k.replace('-', '_').lower()] = v
+
+            elif totals:
+                for total in totals:
+                    if total:
+                        self.log('Total line: {}'.format(line), 2)
+                        total_count = int(total)
+                        output_dict['total_calls'] = total_count
+        self.log('Parsed output: {}'.format(output_dict), 2)
+
+        self.output_dict = output_dict
+        return self.process(output_dict)
+
+    def process(self, d):
+        return -1
 
 
-def run_command(cmd):
-    try:
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        proc.wait()
-        return proc.returncode, proc.stdout.read(), proc.stderr.read()
-    except OSError, e:
-        return 1, "", '{}: {}'.format(e.args[1], cmd[0])
+######################################################
+#   Actual command class definitions
+######################################################
+
+class ShowCallsCount(BaseCommand):
+    COMMAND = 'show calls count'
+
+    def process(self, d):
+        return d.get('total_calls', 0)
 
 
-def parse_output(output, verbosity=0):
-    output_dict = {}
-    for line in output.split('\n'):
-        line = line.strip()
-        match = KEY_VALUE_REGEX.match(line)
-        totals = [i for i in COUNT_TOTAL.findall(line) if i]
-        if match:
-            if verbosity >= 2:
-                print 'Match line: {}'.format(line)
-            k, v = match.groups()
-            if k:
-                output_dict[k.replace('-', '_').lower()] = v
+class SofiaStatus(BaseCommand):
+    COMMAND = 'sofia status profile {profile}'
 
-        elif totals:
-            for total in totals:
-                if total:
-                    if verbosity >= 2:
-                        print 'Total line: {}'.format(line)
-                    total_count = int(total)
-                    output_dict['total_calls'] = total_count
-    return output_dict
+    def process(self, d):
+        return int(d.get('calls_in', 0)) + int(d.get('calls_out', 0))
 
 
-def main(args):
-    verbosity = args.verbosity
-    if verbosity >= 3:
-        print 'Args: {}'.format(args)
-    cmd = ['{fs_cli}'.format(**FS_SETTINGS)]
-    if FS_SETTINGS.get('host', None):
-        cmd += ['--host', FS_SETTINGS.get('host', None)]
-    if FS_SETTINGS.get('port', None):
-        cmd += ['--port', FS_SETTINGS.get('port', None)]
-    if FS_SETTINGS.get('password', None):
-        cmd += ['--password', FS_SETTINGS.get('password', None)]
-    fs_cmd = FS_CHECKS.get(args.query)
-    profile = ''
-    if args.profile:
-        profile = clean_text(args.profile)  # remove anything but [A-Za-z9-0]
-    full_fs_command = fs_cmd.format(profile=profile)
-    cmd += ['-x', full_fs_command]
-    if verbosity >= 2:
-        print 'Command: {}'.format(' '.join(cmd))
-    code, output, errors = run_command(cmd)
-    if verbosity >= 3:
-        print 'Command output: code: {}\n stdout: {}\n stderr: {}'.format(code, output, errors)
-    if code != 0:
-        print 'ERROR: Command failed with code {}: {}'.format(code, errors)
-        exit(CODE.UNKNOWN)
+class FailedCallsIn(BaseCommand):
+    COMMAND = 'sofia status profile {profile}'
 
-    output_dict = parse_output(output, verbosity=verbosity)
-    if verbosity >= 2:
-        print 'Parsed output: {}'.format(output_dict)
+    def process(self, d):
+        return int(d.get('failed_calls_in', 0))
 
-    processor = PROCESSORS.get(args.query, DEFAULT_PROCESSOR)
-    num = processor(output_dict)
-    code = CODE.OK
-    if args.warning and num > args.warning:
-        code = CODE.WARNING
-    if args.critical and num > args.critical:
-        code = CODE.CRITICAL
-    msg = 'FreeSWITCH OK: {} = {}'.format(full_fs_command, num)
-    if args.warning:
-        msg += ';{}'.format(args.warning)
-    if args.critical:
-        msg += ';{}'.format(args.critical)
-    if verbosity >= 1:
-        print 'Exit Code: {}'.format(code)
-    if verbosity >= 3:
-        print 'Message Length: {}'.format(len(msg))
-    print msg
-    exit(code)
+
+class FailedCallsOut(BaseCommand):
+    COMMAND = 'sofia status profile {profile}'
+
+    def process(self, d):
+        return int(d.get('failed_calls_out', 0))
+
+
+FS_CHECKS = {
+    "show-calls-count": ShowCallsCount,
+    "sofia-status": SofiaStatus,
+    "failed-calls-in": FailedCallsIn,
+    "failed-calls-out": FailedCallsOut,
+}
+
+
+KEY_VALUE_REGEX = re.compile('([\w-]*)\s{3,100}(.*)')
+COUNT_TOTAL = re.compile('([\d]*)\s*total')
+
+try:
+    # You can create a file named "fs_settings.py" on your python path with the above variable FS_SETTINGS
+    from fs_settings import *
+except ImportError:
+    traceback.print_exc()
+
+
+def main(main_args):
+    klass = FS_CHECKS.get(main_args.query)(main_args)
+    klass.run()
 
 
 if __name__ == "__main__":
@@ -151,12 +206,12 @@ if __name__ == "__main__":
                              "'show calls count'")
     parser.add_argument('--profile', dest='profile', type=str, help='sofia profile (required for sofia checks)',
                         default=None)
-    args = parser.parse_args()
-    if 'sofia' in args.query and not args.profile:
+    program_args = parser.parse_args()
+    if 'sofia' in program_args.query and not program_args.profile:
         print 'No sofia profile specified'
-        exit(CODE.UNKNOWN)
+        exit(NAGIOS_CODE.UNKNOWN)
     try:
-        main(args)
+        main(program_args)
     except Exception:
         print 'Command Failed: {}'.format(traceback.format_exc(1))
-        exit(CODE.UNKNOWN)
+        exit(NAGIOS_CODE.UNKNOWN)
