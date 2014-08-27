@@ -377,7 +377,7 @@ def main(main_args):
     check = nagiosplugin.Check(
         Freeswitch(main_args),
         nagiosplugin.ScalarContext('calls', main_args.warning, main_args.critical))
-    check.main(verbose=main_args.verbose)
+    check.main(verbose=main_args.verbosity)
 
 
 if __name__ == "__main__":
