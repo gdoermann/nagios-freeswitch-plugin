@@ -45,6 +45,9 @@ def clean_text(value):
 ######################################################
 class BaseCommand(object):
     COMMAND = ''
+    KEY_VALUE_REGEX = re.compile('([\w-]*)\s{3,100}(.*)')
+    COUNT_TOTAL = re.compile('([\d]*)\s*total')
+
 
     def __init__(self, cmd_args):
         self.args = cmd_args
@@ -127,8 +130,8 @@ class BaseCommand(object):
         output_dict = {}
         for line in output.split('\n'):
             line = line.strip()
-            match = KEY_VALUE_REGEX.match(line)
-            totals = [i for i in COUNT_TOTAL.findall(line) if i]
+            match = self.KEY_VALUE_REGEX.match(line)
+            totals = [i for i in self.COUNT_TOTAL.findall(line) if i]
             if match:
                 self.log('Match line: {}'.format(line), 2)
                 k, v = match.groups()
@@ -140,7 +143,7 @@ class BaseCommand(object):
                     if total:
                         self.log('Total line: {}'.format(line), 2)
                         total_count = int(total)
-                        output_dict['total_calls'] = total_count
+                        output_dict['total'] = total_count
         self.log('Parsed output: {}'.format(output_dict), 2)
 
         self.output_dict = output_dict
@@ -158,7 +161,21 @@ class ShowCallsCount(BaseCommand):
     COMMAND = 'show calls count'
 
     def process(self, d):
-        return d.get('total_calls', 0)
+        return d.get('total', 0)
+
+
+class ShowBridgedCallsCount(BaseCommand):
+    COMMAND = 'show bridged_calls count'
+
+    def process(self, d):
+        return d.get('total', 0)
+
+
+class ShowChannelsCount(BaseCommand):
+    COMMAND = 'show channels count'
+
+    def process(self, d):
+        return d.get('total', 0)
 
 
 class SofiaStatus(BaseCommand):
@@ -192,9 +209,6 @@ FS_CHECKS = {
     "failed-calls-in": FailedCallsIn,
     "failed-calls-out": FailedCallsOut,
 }
-
-KEY_VALUE_REGEX = re.compile('([\w-]*)\s{3,100}(.*)')
-COUNT_TOTAL = re.compile('([\d]*)\s*total')
 
 
 def main(main_args):
