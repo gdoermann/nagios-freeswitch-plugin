@@ -5,6 +5,11 @@ import re
 
 __author__ = 'gdoermann'
 
+
+######################################################
+#   Constants and Lib
+######################################################
+
 # Modify this to the location of your fs_cli
 FS_SETTINGS = {
     'fs_cli': '/usr/bin/fs_cli',
@@ -12,6 +17,12 @@ FS_SETTINGS = {
     'port': None,
     'password': None,
 }
+
+try:
+    # You can create a file named "fs_settings.py" on your python path with the above variable FS_SETTINGS
+    from fs_settings import *
+except ImportError:
+    traceback.print_exc()
 
 
 class NAGIOS_CODE:
@@ -28,6 +39,9 @@ def clean_text(value):
     value = unicode(re.sub('[^\w\s-]', '', value))
     return re.sub('[-\s]+', '-', value.strip())
 
+######################################################
+#   Base command class
+######################################################
 
 class BaseCommand(object):
     COMMAND = ''
@@ -168,6 +182,10 @@ class FailedCallsOut(BaseCommand):
         return int(d.get('failed_calls_out', 0))
 
 
+######################################################
+#   Put together the actual functions
+######################################################
+
 FS_CHECKS = {
     "show-calls-count": ShowCallsCount,
     "sofia-status": SofiaStatus,
@@ -179,14 +197,9 @@ FS_CHECKS = {
 KEY_VALUE_REGEX = re.compile('([\w-]*)\s{3,100}(.*)')
 COUNT_TOTAL = re.compile('([\d]*)\s*total')
 
-try:
-    # You can create a file named "fs_settings.py" on your python path with the above variable FS_SETTINGS
-    from fs_settings import *
-except ImportError:
-    traceback.print_exc()
-
 
 def main(main_args):
+    # The only thing main should do is look up the associated class and run it!
     klass = FS_CHECKS.get(main_args.query)(main_args)
     klass.run()
 
