@@ -128,8 +128,10 @@ def main(args):
         msg += ';{}'.format(args.warning)
     if args.critical:
         msg += ';{}'.format(args.critical)
-    if verbosity >=1:
+    if verbosity >= 1:
         print 'Exit Code: {}'.format(code)
+    if verbosity >= 3:
+        print 'Message Length: {}'.format(len(msg))
     print msg
     exit(code)
 
