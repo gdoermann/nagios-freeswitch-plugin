@@ -1,4 +1,15 @@
 #!/usr/bin/env python
+"""
+Examples:
+
+Check channels count.  Greater than 100 warning, greater than 200 is critical
+    python check_freeswitch.py -q show-channels-count --profile=cci -w 100 -c 200
+
+Check freeswitch status.  Greater than 70% warning load, greater than 85% warning load
+    python check_freeswitch.py -q status --profile=cci -w 0.7 -c 0.85
+    python check_freeswitch.py -q status --profile=cci -w 70 -c 85  # Does the same thing as above...
+
+"""
 import traceback
 import subprocess
 import re
@@ -47,6 +58,8 @@ class BaseCommand(object):
     COMMAND = ''
     KEY_VALUE_REGEX = re.compile('([\w-]*)\s{3,100}(.*)')
     COUNT_TOTAL = re.compile('([\d]*)\s*total')
+    DEFAULT_WARNING = None
+    DEFAULT_CRITICAL = None
 
 
     def __init__(self, cmd_args):
@@ -55,24 +68,24 @@ class BaseCommand(object):
         self.output_dict = None
         self.profile = self.args.profile
         self.full_fs_command = self.COMMAND
+        self.warning = self.args.warning or self.DEFAULT_WARNING
+        self.critical = self.args.critical or self.DEFAULT_CRITICAL
+        self.code = NAGIOS_CODE.OK
 
     def at_warning_level(self, n):
-        return self.args.warning and n and n > self.args.warning
+        return self.warning and n and n > self.warning
 
     def at_critical_level(self, n):
-        return self.args.critical and n and n > self.args.critical
+        return self.critical and n and n > self.critical
 
-    def code_for_number(self, n):
+    def determine_code(self, n):
         if self.at_critical_level(n):
-            code = NAGIOS_CODE.CRITICAL
+            self.code = NAGIOS_CODE.CRITICAL
         elif self.at_warning_level(n):
-            code = NAGIOS_CODE.WARNING
-        else:
-            code = NAGIOS_CODE.OK
-        return code
+            self.code = NAGIOS_CODE.WARNING
+        return self.code
 
     def run(self):
-        verbosity = self.args.verbosity
         self.log('Args: {}'.format(self.args), 3)
         code, output, errors = self.run_command()
         self.log('Command output: code: {}\n stdout: {}\n stderr: {}'.format(code, output, errors), 3)
@@ -81,13 +94,13 @@ class BaseCommand(object):
             exit(NAGIOS_CODE.UNKNOWN)
 
         num = self.parse(output)
-        code = self.code_for_number(num)
+        code = self.determine_code(num)
 
         msg = 'FreeSWITCH OK: {} ({}) = {}'.format(self.__class__.__name__, self.full_fs_command, num)
-        if self.args.warning:
-            msg += ';{}'.format(self.args.warning)
-        if self.args.critical:
-            msg += ';{}'.format(self.args.critical)
+        if self.warning:
+            msg += ';{}'.format(self.warning)
+        if self.critical:
+            msg += ';{}'.format(self.critical)
         self.log('Exit Code: {}'.format(code), 1)
         self.log('Message Length: {}'.format(len(msg)), 3)
         print msg
@@ -126,7 +139,7 @@ class BaseCommand(object):
         except OSError, e:
             return 1, "", '{}: {}'.format(e.args[1], cmd[0])
 
-    def parse(self, output):
+    def parse_dict(self, output):
         output_dict = {}
         for line in output.split('\n'):
             line = line.strip()
@@ -145,7 +158,10 @@ class BaseCommand(object):
                         total_count = int(total)
                         output_dict['total'] = total_count
         self.log('Parsed output: {}'.format(output_dict), 2)
+        return output_dict
 
+    def parse(self, output):
+        output_dict = self.parse_dict(output)
         self.output_dict = output_dict
         return self.process(output_dict)
 
@@ -199,22 +215,156 @@ class FailedCallsOut(BaseCommand):
         return int(d.get('failed_calls_out', 0))
 
 
+class FSStatus(BaseCommand):
+    COMMAND = 'status'
+    DEFAULT_WARNING = 0.75
+    DEFAULT_CRITICAL = 0.9
+
+    CHECK_KEYS = None
+
+    def __init__(self, cmd_args):
+        super(FSStatus, self).__init__(cmd_args)
+        # Warnings and critical levels must be percentages
+        if self.warning and self.warning > 1:
+            self.warning = float(self.warning) / 100
+        if self.critical and self.critical > 1:
+            self.critical = float(self.critical) / 100
+
+    def parse_dict(self, output):
+        def format_bytes(s):
+            return float(s.replace('G', '000000000').replace('K', '000').replace('M', '000000'))
+
+        lines = [l.strip() for l in output.split('\n')]
+        total_line = lines[2]
+        sessions_line = lines[3]
+        sps_line = lines[4]
+        max_sessions_line = lines[5]
+        cpu_line = lines[6]
+        stack_line = lines[7]
+
+        self.log('Total Line: {}'.format(total_line), 3)
+        self.log('Sessions Line: {}'.format(sessions_line), 3)
+        self.log('Sessions Per Second Line: {}'.format(sps_line), 3)
+        self.log('Max sessions Line: {}'.format(max_sessions_line), 3)
+        self.log('CPU Line: {}'.format(cpu_line), 3)
+        self.log('Stack Line: {}'.format(stack_line), 3)
+
+        cpu_data = cpu_line.split(' ')[-1].split('/')
+        stack_data = stack_line.split(' ')[-1].split('/')
+
+        output_dict = {
+            'total_sessions': total_line.split(' ')[0],
+            'current_sessions': sessions_line.split(' ')[0],
+            'last_five_sessions': sessions_line.split(' ')[-1],
+            'sessions_per_second': sps_line.split(' ')[-1],
+            'max_sessions_per_second': clean_text(sps_line.split('max')[-1].strip().split(' ')[0]),
+            'last_five_sps': sps_line.split(' ')[-1],
+            'max_sessions': max_sessions_line.split(' ')[0],
+            'cpu_current': format_bytes(cpu_data[0]),
+            'cpu_max': format_bytes(cpu_data[1]),
+            'stack_current': format_bytes(stack_data[0]),
+            'stack_max': format_bytes(stack_data[1]),
+        }
+
+        self.log('Parsed output: {}'.format(output_dict), 2)
+        return output_dict
+
+    def process(self, d):
+        current_sessions = float(d.get('current_sessions'))
+        last_five_sessions = float(d.get('last_five_sessions'))
+        max_sessions = float(d.get('max_sessions'))
+
+        sessions_per_second = float(d.get('sessions_per_second'))
+        last_five_sps = float(d.get('last_five_sps'))
+        max_sessions_per_second = float(d.get('max_sessions_per_second'))
+
+        cpu_current = float(d.get('cpu_current'))
+        cpu_max = float(d.get('cpu_max'))
+
+        stack_current = float(d.get('stack_current'))
+        stack_max = float(d.get('stack_max'))
+
+        return {
+            'sessions': current_sessions / max_sessions,
+            '5min_sessions': last_five_sessions / max_sessions,
+            'sps': sessions_per_second / max_sessions_per_second,
+            '5min_sps': last_five_sps / max_sessions_per_second,
+            'cpu': cpu_current / cpu_max,
+            'stack': stack_current / stack_max,
+        }
+
+    def at_warning_level(self, n):
+        if not self.warning:
+            return False
+        for k, v in n.items():
+            if self.CHECK_KEYS and k not in self.CHECK_KEYS:
+                continue
+            if v and v > self.warning:
+                return True
+        return False
+
+    def at_critical_level(self, n):
+        if not self.critical:
+            return False
+        for k, v in n.items():
+            if self.CHECK_KEYS and k not in self.CHECK_KEYS:
+                continue
+            if v and v > self.critical:
+                return True
+        return False
+
+    def determine_code(self, n):
+        if self.at_critical_level(n):
+            self.code = NAGIOS_CODE.CRITICAL
+        elif self.at_warning_level(n):
+            self.code = NAGIOS_CODE.WARNING
+        return self.code
+
+
+class SessionsPerSecond(FSStatus):
+    CHECK_KEYS = ['sps', '5min_sps']
+
+
+class Sessions(FSStatus):
+    CHECK_KEYS = ['sessions', '5min_sessions']
+
+
+class FSCpu(FSStatus):
+    CHECK_KEYS = ['cpu', ]
+
+
+class FSStack(FSStatus):
+    CHECK_KEYS = ['stack', ]
+
 ######################################################
 #   Put together the actual functions
 ######################################################
 
 FS_CHECKS = {
     "show-calls-count": ShowCallsCount,
+    "show-bridged-calls-count": ShowBridgedCallsCount,
+    "show-channels-count": ShowChannelsCount,
     "sofia-status": SofiaStatus,
     "failed-calls-in": FailedCallsIn,
     "failed-calls-out": FailedCallsOut,
+    "status": FSStatus,
+    'sessions-per-second': SessionsPerSecond,
+    'sessions': Sessions,
+    'cpu': FSCpu,
+    'stack': FSStack,
 }
 
 
 def main(main_args):
     # The only thing main should do is look up the associated class and run it!
-    klass = FS_CHECKS.get(main_args.query)(main_args)
-    klass.run()
+    try:
+        klass = FS_CHECKS.get(main_args.query)(main_args)
+        klass.run()
+    except Exception, e:
+        if main_args.verbosity >= 3:
+            traceback.print_exc()
+        print 'Failed to run command: {}'.format(e)
+        exit(NAGIOS_CODE.UNKNOWN)
 
 
 if __name__ == "__main__":
@@ -223,8 +373,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Separate CDRs for a set of ANIs (DIDs).')
     parser.add_argument('-v', dest='verbosity', type=int, choices=(0, 1, 2, 3),
                         help='Verbosity level.  See: https://www.monitoring-plugins.org/doc/guidelines.html#PLUGOUTPUT')
-    parser.add_argument('-w', dest='warning', type=int, help='Threshold that generates a Nagios warning')
-    parser.add_argument('-c', dest='critical', type=int, help='Threshold that generates a Nagios critical warning')
+    parser.add_argument('-w', dest='warning', type=float, help='Threshold that generates a Nagios warning')
+    parser.add_argument('-c', dest='critical', type=float, help='Threshold that generates a Nagios critical warning')
     parser.add_argument('-f', dest='--perfdatatitle', type=str,
                         help="Title for Nagios Performance Data. Note: don't use spaces.")
     parser.add_argument('-q', '--query', dest='query', type=str, choices=FS_CHECKS.keys(), required=True,
