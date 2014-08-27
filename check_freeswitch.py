@@ -13,6 +13,7 @@ Check freeswitch status.  Greater than 70% warning load, greater than 85% warnin
 import traceback
 import subprocess
 import re
+import nagiosplugin
 
 __author__ = 'gdoermann'
 
@@ -93,18 +94,19 @@ class BaseCommand(object):
             print 'ERROR: Command failed with code {}: {}'.format(code, errors)
             exit(NAGIOS_CODE.UNKNOWN)
 
-        num = self.parse(output)
-        code = self.determine_code(num)
-
-        msg = 'FreeSWITCH OK: {} ({}) = {}'.format(self.__class__.__name__, self.full_fs_command, num)
-        if self.warning:
-            msg += ';{}'.format(self.warning)
-        if self.critical:
-            msg += ';{}'.format(self.critical)
-        self.log('Exit Code: {}'.format(code), 1)
-        self.log('Message Length: {}'.format(len(msg)), 3)
-        print msg
-        exit(code)
+        return self.parse(output)
+        # num = self.parse(output)
+        # code = self.determine_code(num)
+        #
+        # msg = 'FreeSWITCH OK: {} ({}) = {}'.format(self.__class__.__name__, self.full_fs_command, num)
+        # if self.warning:
+        #     msg += ';{}'.format(self.warning)
+        # if self.critical:
+        #     msg += ';{}'.format(self.critical)
+        # self.log('Exit Code: {}'.format(code), 1)
+        # self.log('Message Length: {}'.format(len(msg)), 3)
+        # print msg
+        # exit(code)
 
     @property
     def cmd_args(self):
@@ -166,7 +168,7 @@ class BaseCommand(object):
         return self.process(output_dict)
 
     def process(self, d):
-        return -1
+        yield nagiosplugin.Metric('total', -1, min=-1, context='calls')
 
 
 ######################################################
@@ -177,42 +179,43 @@ class ShowCallsCount(BaseCommand):
     COMMAND = 'show calls count'
 
     def process(self, d):
-        return d.get('total', 0)
+        yield nagiosplugin.Metric('total', d.get('total', 0), min=-1, context='calls')
 
 
 class ShowBridgedCallsCount(BaseCommand):
     COMMAND = 'show bridged_calls count'
 
     def process(self, d):
-        return d.get('total', 0)
+        yield nagiosplugin.Metric('total', d.get('total', 0), min=0, context='calls')
 
 
 class ShowChannelsCount(BaseCommand):
     COMMAND = 'show channels count'
 
     def process(self, d):
-        return d.get('total', 0)
+        yield nagiosplugin.Metric('total', d.get('total', 0), min=0, context='calls')
 
 
 class SofiaStatus(BaseCommand):
     COMMAND = 'sofia status profile {profile}'
 
     def process(self, d):
-        return int(d.get('calls_in', 0)) + int(d.get('calls_out', 0))
+        total = int(d.get('calls_in', 0)) + int(d.get('calls_out', 0))
+        yield nagiosplugin.Metric('profile_calls', total, min=0, context='calls')
 
 
 class FailedCallsIn(BaseCommand):
     COMMAND = 'sofia status profile {profile}'
 
     def process(self, d):
-        return int(d.get('failed_calls_in', 0))
+        yield nagiosplugin.Metric('failed_calls_in', int(d.get('failed_calls_in', 0)), min=0, context='calls')
 
 
 class FailedCallsOut(BaseCommand):
     COMMAND = 'sofia status profile {profile}'
 
     def process(self, d):
-        return int(d.get('failed_calls_out', 0))
+        yield nagiosplugin.Metric('failed_calls_out', int(d.get('failed_calls_out', 0)), min=0, context='calls')
 
 
 class FSStatus(BaseCommand):
@@ -284,7 +287,7 @@ class FSStatus(BaseCommand):
         stack_current = float(d.get('stack_current'))
         stack_max = float(d.get('stack_max'))
 
-        return {
+        data = {
             'sessions': current_sessions / max_sessions,
             '5min_sessions': last_five_sessions / max_sessions,
             'sps': sessions_per_second / max_sessions_per_second,
@@ -292,6 +295,8 @@ class FSStatus(BaseCommand):
             'cpu': cpu_current / cpu_max,
             'stack': stack_current / stack_max,
         }
+        for k, v in data.items():
+            yield nagiosplugin.Metric(k, v, min=0.0, context='calls')
 
     def at_warning_level(self, n):
         if not self.warning:
@@ -355,16 +360,24 @@ FS_CHECKS = {
 }
 
 
+class Freeswitch(nagiosplugin.Resource):
+    def __init__(self, args):
+        super(Freeswitch, self).__init__()
+        self.args = args
+        self.klass = FS_CHECKS.get(self.args.query)
+
+    def probe(self):
+        inst = self.klass(self.args)
+        return inst.run()
+
+
+@nagiosplugin.guarded
 def main(main_args):
     # The only thing main should do is look up the associated class and run it!
-    try:
-        klass = FS_CHECKS.get(main_args.query)(main_args)
-        klass.run()
-    except Exception, e:
-        if main_args.verbosity >= 3:
-            traceback.print_exc()
-        print 'Failed to run command: {}'.format(e)
-        exit(NAGIOS_CODE.UNKNOWN)
+    check = nagiosplugin.Check(
+        Freeswitch(main_args),
+        nagiosplugin.ScalarContext('calls', main_args.warning, main_args.critical))
+    check.main(verbose=main_args.verbose)
 
 
 if __name__ == "__main__":
@@ -377,17 +390,14 @@ if __name__ == "__main__":
     parser.add_argument('-c', dest='critical', type=float, help='Threshold that generates a Nagios critical warning')
     parser.add_argument('-f', dest='--perfdatatitle', type=str,
                         help="Title for Nagios Performance Data. Note: don't use spaces.")
-    parser.add_argument('-q', '--query', dest='query', type=str, choices=FS_CHECKS.keys(), required=True,
-                        help="These are mapped to specific fs_cli -x checks e.g. show-calls-count is mapped to "
-                             "'show calls count'")
+    parser.add_argument('-q', '--query', dest='query', type=str, choices=FS_CHECKS.keys(),
+                        default='status', help="These are mapped to specific fs_cli -x checks e.g. show-calls-count "
+                                               "is mapped to 'show calls count'.  Default=status")
     parser.add_argument('--profile', dest='profile', type=str, help='sofia profile (required for sofia checks)',
                         default=None)
     program_args = parser.parse_args()
     if 'sofia' in program_args.query and not program_args.profile:
         print 'No sofia profile specified'
         exit(NAGIOS_CODE.UNKNOWN)
-    try:
-        main(program_args)
-    except Exception:
-        print 'Command Failed: {}'.format(traceback.format_exc(1))
-        exit(NAGIOS_CODE.UNKNOWN)
+
+    main(program_args)
