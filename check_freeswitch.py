@@ -13,6 +13,7 @@ Check freeswitch status.  Greater than 70% warning load, greater than 85% warnin
 import traceback
 import subprocess
 import re
+import nagiosplugin
 
 __author__ = 'gdoermann'
 
@@ -51,6 +52,13 @@ def clean_text(value):
     return re.sub('[-\s]+', '-', value.strip())
 
 
+def cast(s, typ=float, default=None):
+    try:
+        return typ(s)
+    except (ValueError, TypeError):
+        return default
+
+
 ######################################################
 #   Base command class
 ######################################################
@@ -60,7 +68,6 @@ class BaseCommand(object):
     COUNT_TOTAL = re.compile('([\d]*)\s*total')
     DEFAULT_WARNING = None
     DEFAULT_CRITICAL = None
-
 
     def __init__(self, cmd_args):
         self.args = cmd_args
@@ -72,19 +79,6 @@ class BaseCommand(object):
         self.critical = self.args.critical or self.DEFAULT_CRITICAL
         self.code = NAGIOS_CODE.OK
 
-    def at_warning_level(self, n):
-        return self.warning and n and n > self.warning
-
-    def at_critical_level(self, n):
-        return self.critical and n and n > self.critical
-
-    def determine_code(self, n):
-        if self.at_critical_level(n):
-            self.code = NAGIOS_CODE.CRITICAL
-        elif self.at_warning_level(n):
-            self.code = NAGIOS_CODE.WARNING
-        return self.code
-
     def run(self):
         self.log('Args: {}'.format(self.args), 3)
         code, output, errors = self.run_command()
@@ -93,18 +87,7 @@ class BaseCommand(object):
             print 'ERROR: Command failed with code {}: {}'.format(code, errors)
             exit(NAGIOS_CODE.UNKNOWN)
 
-        num = self.parse(output)
-        code = self.determine_code(num)
-
-        msg = 'FreeSWITCH OK: {} ({}) = {}'.format(self.__class__.__name__, self.full_fs_command, num)
-        if self.warning:
-            msg += ';{}'.format(self.warning)
-        if self.critical:
-            msg += ';{}'.format(self.critical)
-        self.log('Exit Code: {}'.format(code), 1)
-        self.log('Message Length: {}'.format(len(msg)), 3)
-        print msg
-        exit(code)
+        return self.parse(output)
 
     @property
     def cmd_args(self):
@@ -166,7 +149,7 @@ class BaseCommand(object):
         return self.process(output_dict)
 
     def process(self, d):
-        return -1
+        yield nagiosplugin.Metric('total', -1, min=-1, context='calls')
 
 
 ######################################################
@@ -177,42 +160,43 @@ class ShowCallsCount(BaseCommand):
     COMMAND = 'show calls count'
 
     def process(self, d):
-        return d.get('total', 0)
+        yield nagiosplugin.Metric('total', d.get('total', 0), min=-1, context='calls')
 
 
 class ShowBridgedCallsCount(BaseCommand):
     COMMAND = 'show bridged_calls count'
 
     def process(self, d):
-        return d.get('total', 0)
+        yield nagiosplugin.Metric('total', d.get('total', 0), min=0, context='calls')
 
 
 class ShowChannelsCount(BaseCommand):
     COMMAND = 'show channels count'
 
     def process(self, d):
-        return d.get('total', 0)
+        yield nagiosplugin.Metric('total', d.get('total', 0), min=0, context='calls')
 
 
 class SofiaStatus(BaseCommand):
     COMMAND = 'sofia status profile {profile}'
 
     def process(self, d):
-        return int(d.get('calls_in', 0)) + int(d.get('calls_out', 0))
+        total = int(d.get('calls_in', 0)) + int(d.get('calls_out', 0))
+        yield nagiosplugin.Metric('profile_calls', total, min=0, context='calls')
 
 
 class FailedCallsIn(BaseCommand):
     COMMAND = 'sofia status profile {profile}'
 
     def process(self, d):
-        return int(d.get('failed_calls_in', 0))
+        yield nagiosplugin.Metric('failed_calls_in', int(d.get('failed_calls_in', 0)), min=0, context='calls')
 
 
 class FailedCallsOut(BaseCommand):
     COMMAND = 'sofia status profile {profile}'
 
     def process(self, d):
-        return int(d.get('failed_calls_out', 0))
+        yield nagiosplugin.Metric('failed_calls_out', int(d.get('failed_calls_out', 0)), min=0, context='calls')
 
 
 class FSStatus(BaseCommand):
@@ -232,15 +216,26 @@ class FSStatus(BaseCommand):
 
     def parse_dict(self, output):
         def format_bytes(s):
-            return float(s.replace('G', '000000000').replace('K', '000').replace('M', '000000'))
+            n = s.strip().replace('G', '000000000').replace('K', '000').replace('M', '000000')
+            try:
+                return cast(n)
+            except Exception:
+                self.log("ERROR: Could not convert to string: {}".format(n), 0)
+                self.log(traceback.format_exc(), 2)
 
         lines = [l.strip() for l in output.split('\n')]
-        total_line = lines[2]
-        sessions_line = lines[3]
-        sps_line = lines[4]
-        max_sessions_line = lines[5]
-        cpu_line = lines[6]
-        stack_line = lines[7]
+
+        def find_line(txt):
+            for ln in lines:
+                if txt in ln.lower():
+                    return ln
+
+        total_line = find_line('since startup')
+        sessions_line = find_line('session(s) - peak')
+        sps_line = find_line('per sec')
+        max_sessions_line = find_line("session(s) max")
+        cpu_line = find_line("cpu")
+        stack_line = find_line("stack")
 
         self.log('Total Line: {}'.format(total_line), 3)
         self.log('Sessions Line: {}'.format(sessions_line), 3)
@@ -253,72 +248,55 @@ class FSStatus(BaseCommand):
         stack_data = stack_line.split(' ')[-1].split('/')
 
         output_dict = {
-            'total_sessions': total_line.split(' ')[0],
-            'current_sessions': sessions_line.split(' ')[0],
-            'last_five_sessions': sessions_line.split(' ')[-1],
-            'sessions_per_second': sps_line.split(' ')[-1],
-            'max_sessions_per_second': clean_text(sps_line.split('max')[-1].strip().split(' ')[0]),
-            'last_five_sps': sps_line.split(' ')[-1],
-            'max_sessions': max_sessions_line.split(' ')[0],
-            'cpu_current': format_bytes(cpu_data[0]),
-            'cpu_max': format_bytes(cpu_data[1]),
-            'stack_current': format_bytes(stack_data[0]),
-            'stack_max': format_bytes(stack_data[1]),
+            'total_sessions': cast(total_line.split(' ')[0]),
+            'current_sessions': cast(str(sessions_line).split(' ')[0]),
+            'last_five_sessions': cast(str(sessions_line).split(' ')[-1]),
+            'sessions_per_second': cast(str(sps_line).split(' ')[-1]),
+            'max_sessions_per_second': cast(clean_text(sps_line.split('max')[-1].strip().split(' ')[0])),
+            'last_five_sps': cast(str(sps_line).split(' ')[-1]),
+            'max_sessions': cast(max_sessions_line.split(' ')[0]),
+            'cpu_current': cast(format_bytes(cpu_data[0])),
+            'cpu_max': cast(format_bytes(cpu_data[1])),
+            'stack_current': cast(format_bytes(stack_data[0])),
+            'stack_max': cast(format_bytes(stack_data[1])),
         }
 
         self.log('Parsed output: {}'.format(output_dict), 2)
         return output_dict
 
     def process(self, d):
-        current_sessions = float(d.get('current_sessions'))
-        last_five_sessions = float(d.get('last_five_sessions'))
-        max_sessions = float(d.get('max_sessions'))
+        current_sessions = cast(d.get('current_sessions'))
+        last_five_sessions = cast(d.get('last_five_sessions'))
+        max_sessions = cast(d.get('max_sessions'))
 
-        sessions_per_second = float(d.get('sessions_per_second'))
-        last_five_sps = float(d.get('last_five_sps'))
-        max_sessions_per_second = float(d.get('max_sessions_per_second'))
+        sessions_per_second = cast(d.get('sessions_per_second'))
+        last_five_sps = cast(d.get('last_five_sps'))
+        max_sessions_per_second = cast(d.get('max_sessions_per_second'))
 
-        cpu_current = float(d.get('cpu_current'))
-        cpu_max = float(d.get('cpu_max'))
+        cpu_current = cast(d.get('cpu_current'))
+        cpu_max = cast(d.get('cpu_max'))
 
-        stack_current = float(d.get('stack_current'))
-        stack_max = float(d.get('stack_max'))
+        stack_current = cast(d.get('stack_current'))
+        stack_max = cast(d.get('stack_max'))
 
-        return {
-            'sessions': current_sessions / max_sessions,
-            '5min_sessions': last_five_sessions / max_sessions,
-            'sps': sessions_per_second / max_sessions_per_second,
-            '5min_sps': last_five_sps / max_sessions_per_second,
-            'cpu': cpu_current / cpu_max,
-            'stack': stack_current / stack_max,
+        def pct(n1, n2):
+            if n1 is None or not n2:
+                return
+            else:
+                return n1 / n2 * 100.0
+
+        data = {
+            'sessions': pct(current_sessions, max_sessions) or 0,
+            '5min_sessions': pct(last_five_sessions, max_sessions) or 0,
+            'sps': pct(sessions_per_second, max_sessions_per_second) or 0,
+            '5min_sps': pct(last_five_sps, max_sessions_per_second) or 0,
+            'cpu': pct(cpu_current, cpu_max) or 0,
+            'stack': pct(stack_current, stack_max) or 0,
         }
-
-    def at_warning_level(self, n):
-        if not self.warning:
-            return False
-        for k, v in n.items():
+        for k, v in data.items():
             if self.CHECK_KEYS and k not in self.CHECK_KEYS:
                 continue
-            if v and v > self.warning:
-                return True
-        return False
-
-    def at_critical_level(self, n):
-        if not self.critical:
-            return False
-        for k, v in n.items():
-            if self.CHECK_KEYS and k not in self.CHECK_KEYS:
-                continue
-            if v and v > self.critical:
-                return True
-        return False
-
-    def determine_code(self, n):
-        if self.at_critical_level(n):
-            self.code = NAGIOS_CODE.CRITICAL
-        elif self.at_warning_level(n):
-            self.code = NAGIOS_CODE.WARNING
-        return self.code
+            yield nagiosplugin.Metric(k, v, min=0.0, context='calls')
 
 
 class SessionsPerSecond(FSStatus):
@@ -355,16 +333,24 @@ FS_CHECKS = {
 }
 
 
+class Freeswitch(nagiosplugin.Resource):
+    def __init__(self, args):
+        super(Freeswitch, self).__init__()
+        self.args = args
+        self.klass = FS_CHECKS.get(self.args.query)
+
+    def probe(self):
+        inst = self.klass(self.args)
+        return inst.run()
+
+
+@nagiosplugin.guarded
 def main(main_args):
     # The only thing main should do is look up the associated class and run it!
-    try:
-        klass = FS_CHECKS.get(main_args.query)(main_args)
-        klass.run()
-    except Exception, e:
-        if main_args.verbosity >= 3:
-            traceback.print_exc()
-        print 'Failed to run command: {}'.format(e)
-        exit(NAGIOS_CODE.UNKNOWN)
+    check = nagiosplugin.Check(
+        Freeswitch(main_args),
+        nagiosplugin.ScalarContext('calls', main_args.warning, main_args.critical))
+    check.main(verbose=main_args.verbosity)
 
 
 if __name__ == "__main__":
@@ -377,17 +363,14 @@ if __name__ == "__main__":
     parser.add_argument('-c', dest='critical', type=float, help='Threshold that generates a Nagios critical warning')
     parser.add_argument('-f', dest='--perfdatatitle', type=str,
                         help="Title for Nagios Performance Data. Note: don't use spaces.")
-    parser.add_argument('-q', '--query', dest='query', type=str, choices=FS_CHECKS.keys(), required=True,
-                        help="These are mapped to specific fs_cli -x checks e.g. show-calls-count is mapped to "
-                             "'show calls count'")
+    parser.add_argument('-q', '--query', dest='query', type=str, choices=FS_CHECKS.keys(),
+                        default='status', help="These are mapped to specific fs_cli -x checks e.g. show-calls-count "
+                                               "is mapped to 'show calls count'.  Default=status")
     parser.add_argument('--profile', dest='profile', type=str, help='sofia profile (required for sofia checks)',
                         default=None)
     program_args = parser.parse_args()
     if 'sofia' in program_args.query and not program_args.profile:
         print 'No sofia profile specified'
         exit(NAGIOS_CODE.UNKNOWN)
-    try:
-        main(program_args)
-    except Exception:
-        print 'Command Failed: {}'.format(traceback.format_exc(1))
-        exit(NAGIOS_CODE.UNKNOWN)
+
+    main(program_args)
