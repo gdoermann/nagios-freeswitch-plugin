@@ -52,6 +52,13 @@ def clean_text(value):
     return re.sub('[-\s]+', '-', value.strip())
 
 
+def cast(s, typ=float, default=None):
+    try:
+        return typ(s)
+    except (ValueError, TypeError):
+        return default
+
+
 ######################################################
 #   Base command class
 ######################################################
@@ -61,7 +68,6 @@ class BaseCommand(object):
     COUNT_TOTAL = re.compile('([\d]*)\s*total')
     DEFAULT_WARNING = None
     DEFAULT_CRITICAL = None
-
 
     def __init__(self, cmd_args):
         self.args = cmd_args
@@ -73,19 +79,6 @@ class BaseCommand(object):
         self.critical = self.args.critical or self.DEFAULT_CRITICAL
         self.code = NAGIOS_CODE.OK
 
-    def at_warning_level(self, n):
-        return self.warning and n and n > self.warning
-
-    def at_critical_level(self, n):
-        return self.critical and n and n > self.critical
-
-    def determine_code(self, n):
-        if self.at_critical_level(n):
-            self.code = NAGIOS_CODE.CRITICAL
-        elif self.at_warning_level(n):
-            self.code = NAGIOS_CODE.WARNING
-        return self.code
-
     def run(self):
         self.log('Args: {}'.format(self.args), 3)
         code, output, errors = self.run_command()
@@ -95,18 +88,6 @@ class BaseCommand(object):
             exit(NAGIOS_CODE.UNKNOWN)
 
         return self.parse(output)
-        # num = self.parse(output)
-        # code = self.determine_code(num)
-        #
-        # msg = 'FreeSWITCH OK: {} ({}) = {}'.format(self.__class__.__name__, self.full_fs_command, num)
-        # if self.warning:
-        #     msg += ';{}'.format(self.warning)
-        # if self.critical:
-        #     msg += ';{}'.format(self.critical)
-        # self.log('Exit Code: {}'.format(code), 1)
-        # self.log('Message Length: {}'.format(len(msg)), 3)
-        # print msg
-        # exit(code)
 
     @property
     def cmd_args(self):
@@ -235,15 +216,26 @@ class FSStatus(BaseCommand):
 
     def parse_dict(self, output):
         def format_bytes(s):
-            return float(s.replace('G', '000000000').replace('K', '000').replace('M', '000000'))
+            n = s.strip().replace('G', '000000000').replace('K', '000').replace('M', '000000')
+            try:
+                return cast(n)
+            except Exception:
+                self.log("ERROR: Could not convert to string: {}".format(n), 0)
+                self.log(traceback.format_exc(), 2)
 
         lines = [l.strip() for l in output.split('\n')]
-        total_line = lines[2]
-        sessions_line = lines[3]
-        sps_line = lines[4]
-        max_sessions_line = lines[5]
-        cpu_line = lines[6]
-        stack_line = lines[7]
+
+        def find_line(txt):
+            for ln in lines:
+                if txt in ln.lower():
+                    return ln
+
+        total_line = find_line('since startup')
+        sessions_line = find_line('session(s) - peak')
+        sps_line = find_line('per sec')
+        max_sessions_line = find_line("session(s) max")
+        cpu_line = find_line("cpu")
+        stack_line = find_line("stack")
 
         self.log('Total Line: {}'.format(total_line), 3)
         self.log('Sessions Line: {}'.format(sessions_line), 3)
@@ -256,74 +248,55 @@ class FSStatus(BaseCommand):
         stack_data = stack_line.split(' ')[-1].split('/')
 
         output_dict = {
-            'total_sessions': total_line.split(' ')[0],
-            'current_sessions': sessions_line.split(' ')[0],
-            'last_five_sessions': sessions_line.split(' ')[-1],
-            'sessions_per_second': sps_line.split(' ')[-1],
-            'max_sessions_per_second': clean_text(sps_line.split('max')[-1].strip().split(' ')[0]),
-            'last_five_sps': sps_line.split(' ')[-1],
-            'max_sessions': max_sessions_line.split(' ')[0],
-            'cpu_current': format_bytes(cpu_data[0]),
-            'cpu_max': format_bytes(cpu_data[1]),
-            'stack_current': format_bytes(stack_data[0]),
-            'stack_max': format_bytes(stack_data[1]),
+            'total_sessions': cast(total_line.split(' ')[0]),
+            'current_sessions': cast(sessions_line.split(' ')[0]),
+            'last_five_sessions': cast(sessions_line.split(' ')[-1]),
+            'sessions_per_second': cast(sps_line.split(' ')[-1]),
+            'max_sessions_per_second': cast(clean_text(sps_line.split('max')[-1].strip().split(' ')[0])),
+            'last_five_sps': cast(sps_line.split(' ')[-1]),
+            'max_sessions': cast(max_sessions_line.split(' ')[0]),
+            'cpu_current': cast(format_bytes(cpu_data[0])),
+            'cpu_max': cast(format_bytes(cpu_data[1])),
+            'stack_current': cast(format_bytes(stack_data[0])),
+            'stack_max': cast(format_bytes(stack_data[1])),
         }
 
         self.log('Parsed output: {}'.format(output_dict), 2)
         return output_dict
 
     def process(self, d):
-        current_sessions = float(d.get('current_sessions'))
-        last_five_sessions = float(d.get('last_five_sessions'))
-        max_sessions = float(d.get('max_sessions'))
+        current_sessions = cast(d.get('current_sessions'))
+        last_five_sessions = cast(d.get('last_five_sessions'))
+        max_sessions = cast(d.get('max_sessions'))
 
-        sessions_per_second = float(d.get('sessions_per_second'))
-        last_five_sps = float(d.get('last_five_sps'))
-        max_sessions_per_second = float(d.get('max_sessions_per_second'))
+        sessions_per_second = cast(d.get('sessions_per_second'))
+        last_five_sps = cast(d.get('last_five_sps'))
+        max_sessions_per_second = cast(d.get('max_sessions_per_second'))
 
-        cpu_current = float(d.get('cpu_current'))
-        cpu_max = float(d.get('cpu_max'))
+        cpu_current = cast(d.get('cpu_current'))
+        cpu_max = cast(d.get('cpu_max'))
 
-        stack_current = float(d.get('stack_current'))
-        stack_max = float(d.get('stack_max'))
+        stack_current = cast(d.get('stack_current'))
+        stack_max = cast(d.get('stack_max'))
+
+        def pct(n1, n2):
+            if n1 is None or not n2:
+                return
+            else:
+                return n1 / n2 * 100.0
 
         data = {
-            'sessions': current_sessions / max_sessions * 100.0,
-            '5min_sessions': last_five_sessions / max_sessions * 100.0,
-            'sps': sessions_per_second / max_sessions_per_second * 100.0,
-            '5min_sps': last_five_sps / max_sessions_per_second * 100.0,
-            'cpu': cpu_current / cpu_max * 100.0,
-            'stack': stack_current / stack_max * 100.0,
+            'sessions': pct(current_sessions, max_sessions) or 0,
+            '5min_sessions': pct(last_five_sessions, max_sessions) or 0,
+            'sps': pct(sessions_per_second, max_sessions_per_second) or 0,
+            '5min_sps': pct(last_five_sps, max_sessions_per_second) or 0,
+            'cpu': pct(cpu_current, cpu_max) or 0,
+            'stack': pct(stack_current, stack_max) or 0,
         }
         for k, v in data.items():
+            if self.CHECK_KEYS and k not in self.CHECK_KEYS:
+                continue
             yield nagiosplugin.Metric(k, v, min=0.0, context='calls')
-
-    def at_warning_level(self, n):
-        if not self.warning:
-            return False
-        for k, v in n.items():
-            if self.CHECK_KEYS and k not in self.CHECK_KEYS:
-                continue
-            if v and v > self.warning:
-                return True
-        return False
-
-    def at_critical_level(self, n):
-        if not self.critical:
-            return False
-        for k, v in n.items():
-            if self.CHECK_KEYS and k not in self.CHECK_KEYS:
-                continue
-            if v and v > self.critical:
-                return True
-        return False
-
-    def determine_code(self, n):
-        if self.at_critical_level(n):
-            self.code = NAGIOS_CODE.CRITICAL
-        elif self.at_warning_level(n):
-            self.code = NAGIOS_CODE.WARNING
-        return self.code
 
 
 class SessionsPerSecond(FSStatus):
